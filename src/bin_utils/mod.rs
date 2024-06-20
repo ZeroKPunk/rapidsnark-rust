@@ -1,36 +1,41 @@
-
-use byteorder::{LittleEndian, ReadBytesExt};
-use ark_std::io::{Read, Seek, SeekFrom};
-use ark_serialize::{SerializationError};
+use ark_serialize::SerializationError;
 use ark_serialize::SerializationError::IoError;
+use ark_std::io::{Read, Seek, SeekFrom};
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
-
+use std::io::{BufRead, Error, ErrorKind};
 
 type IoResult<T> = Result<T, SerializationError>;
-
 
 pub struct BinFile<R: Read + Seek> {
     pub reader: R,
     pub bin_type: String,
-    pub sections_map: HashMap::<u32, Vec<Section>>,
-    pub reading_section: Option<Section>
+    pub sections_map: HashMap<u32, Vec<Section>>,
+    pub reading_section: Option<Section>,
 }
 
+#[derive(Debug)]
 pub struct Section {
-    pub offset: u32,
-    pub size: u32
+    pub offset: u64,
+    pub size: u32,
 }
 
 impl<R: Read + Seek> BinFile<R> {
-    pub fn new_from_reader(mut reader: R, bin_type: String, max_version: u32) -> IoResult<BinFile<R>> {
+    pub fn new_from_reader(
+        mut reader: R,
+        bin_type: String,
+        max_version: u32,
+    ) -> IoResult<BinFile<R>> {
         let mut header = [0u8; 4];
         reader.read_exact(&mut header)?;
 
         if bin_type != String::from_utf8(header.to_vec()).unwrap() {
             return Err(IoError(Error::new(
                 ErrorKind::InvalidData,
-                "Invalid magic number",
+                format!(
+                    "Invalid bin type {:?}",
+                    String::from_utf8(header.to_vec()).unwrap()
+                ),
             )));
         }
 
@@ -51,11 +56,20 @@ impl<R: Read + Seek> BinFile<R> {
             let sec_size = reader.read_u64::<LittleEndian>()?;
             let offset = reader.stream_position()?;
             if let Some(sec) = sec_map.get_mut(&sec_type) {
-                sec.push(Section { offset: offset as u32, size: sec_size as u32 });
+                sec.push(Section {
+                    offset: offset as u64,
+                    size: sec_size as u32,
+                });
             } else {
-                sec_map.insert(sec_type, vec![Section { offset: offset as u32, size: sec_size as u32 }]);
+                sec_map.insert(
+                    sec_type,
+                    vec![Section {
+                        offset: offset as u64,
+                        size: sec_size as u32,
+                    }],
+                );
             }
-           
+
             reader.seek(SeekFrom::Current(sec_size as i64))?;
         }
         reader.seek(SeekFrom::Start(0))?;
@@ -64,7 +78,7 @@ impl<R: Read + Seek> BinFile<R> {
             reader,
             bin_type,
             sections_map: sec_map,
-            reading_section: None
+            reading_section: None,
         })
     }
 
@@ -76,25 +90,53 @@ impl<R: Read + Seek> BinFile<R> {
         self.reader.read_u64::<LittleEndian>().unwrap()
     }
 
-    pub fn start_read_section(&mut self, section_id: u32, section_index: Option<u32>) -> IoResult<()>{
-        let section = self.sections_map.get(&section_id).ok_or_else(|| {
-            Error::new(
+    pub fn read(&mut self, len: u64) -> Vec<u8> {
+        let mut buf = vec![0u8; len as usize];
+        self.reader.read_exact(&mut buf).unwrap();
+        buf
+    }
+    pub fn start_read_section(
+        &mut self,
+        section_id: u32,
+        section_index: Option<u32>,
+    ) -> IoResult<()> {
+        if self.reading_section.is_some() {
+            return Err(IoError(Error::new(
                 ErrorKind::InvalidData,
-                "No section offset for wire2label type found",)
-            }).unwrap();
-        let section_index: u32 = if (section_index.is_some() && section_index.unwrap() < section.len() as u32) {
-            section_index.unwrap()
-        } else { 0 };
+                "Already reading a section",
+            )));
+        }
+
+        let section = self
+            .sections_map
+            .get(&section_id)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "No section offset for wire2label type found",
+                )
+            })
+            .unwrap();
+        let section_index: u32 =
+            if (section_index.is_some() && section_index.unwrap() < section.len() as u32) {
+                section_index.unwrap()
+            } else {
+                0
+            };
         let section = section.get(section_index as usize).unwrap();
-        self.reading_section = Some(Section { offset: section.offset, size: section.size });
-        self.reader.seek(SeekFrom::Start(section.offset as u64 + section.size as u64)).unwrap();
+        self.reading_section = Some(Section {
+            offset: section.offset,
+            size: section.size,
+        });
+        // self.reader.seek(SeekFrom::Start(section.offset as u64 + section.size as u64)).unwrap();
+        self.reader
+            .seek(SeekFrom::Start(section.offset as u64))
+            .unwrap();
         Ok(())
     }
 
     pub fn end_read_section(&mut self, check: Option<bool>) -> IoResult<()> {
-        
         self.reading_section = None;
         Ok(())
     }
 }
-
